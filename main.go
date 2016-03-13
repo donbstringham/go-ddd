@@ -10,8 +10,12 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/go-kit/kit/log"
+	stdprometheus "github.com/prometheus/client_golang/prometheus"
 	"golang.org/x/net/context"
+
+	"github.com/go-kit/kit/log"
+	"github.com/go-kit/kit/metrics"
+	kitprometheus "github.com/go-kit/kit/metrics/prometheus"
 
 	"github.com/marcusolsson/goddd/booking"
 	"github.com/marcusolsson/goddd/cargo"
@@ -46,6 +50,22 @@ func main() {
 	logger = &serializedLogger{Logger: logger}
 	logger = log.NewContext(logger).With("ts", log.DefaultTimestampUTC)
 
+	fieldKeys := []string{"method"}
+
+	requestCount := kitprometheus.NewCounter(stdprometheus.CounterOpts{
+		Namespace: "api",
+		Subsystem: "booking_service",
+		Name:      "request_count",
+		Help:      "Number of requests received.",
+	}, fieldKeys)
+
+	requestLatency := metrics.NewTimeHistogram(time.Microsecond, kitprometheus.NewSummary(stdprometheus.SummaryOpts{
+		Namespace: "api",
+		Subsystem: "booking_service",
+		Name:      "request_latency_microseconds",
+		Help:      "Total duration of requests in microseconds.",
+	}, fieldKeys))
+
 	var (
 		cargos         = repository.NewCargo()
 		locations      = repository.NewLocation()
@@ -74,6 +94,7 @@ func main() {
 	var bs booking.Service
 	bs = booking.NewService(cargos, locations, handlingEvents, rs)
 	bs = booking.NewLoggingService(log.NewContext(logger).With("component", "booking"), bs)
+	bs = booking.NewInstrumentingService(requestCount, requestLatency, bs)
 
 	var ts tracking.Service
 	ts = tracking.NewService(cargos, handlingEvents)
@@ -92,6 +113,7 @@ func main() {
 	mux.Handle("/handling/v1/", handling.MakeHandler(ctx, hs, httpLogger))
 
 	http.Handle("/", accessControl(mux))
+	http.Handle("/metrics", stdprometheus.Handler())
 
 	errs := make(chan error, 2)
 	go func() {
